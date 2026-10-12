@@ -472,7 +472,7 @@ const state = {
   groups: new Set()
 };
 
-const V = () => DATA.views[state.u + '|' + state.b];
+const V = () => DATA.views[state.u + '|' + state.b] || {groups: [], groupColors: {}, items: []};
 const benchLabel = () => (DATA.benchmarks.find(x => x.key === state.b) || {}).label || '';
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const visible = () => V().items.filter(it => state.groups.has(it.group));
@@ -698,8 +698,8 @@ function renderBreadth(){
   const iw = W - M.l - M.r, ih = H - M.t - M.b;
   const X = i => M.l + (D.length < 2 ? 0 : i / (D.length - 1) * iw);
   const Y = v => M.t + (1 - v / 100) * ih;
-  const iv = I.filter(v => v != null);
-  const lo = Math.min(...iv), hi = Math.max(...iv), pad = (hi - lo) * 0.06 || 1;
+  const iv = I.filter(v => v != null), hasI = iv.length > 1;
+  const lo = hasI ? Math.min(...iv) : 0, hi = hasI ? Math.max(...iv) : 1, pad = (hi - lo) * 0.06 || 1;
   const YI = v => M.t + (1 - (v - lo + pad) / (hi - lo + 2 * pad)) * ih;
   const path = (arr, f) => { let p = '', pen = false;
     arr.forEach((v, i) => { if (v == null){ pen = false; return; }
@@ -713,7 +713,7 @@ function renderBreadth(){
     g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,${v === 50 ? .28 : .07})" ${v === 50 ? 'stroke-dasharray="5 5"' : ''}/>`;
     g += `<text x="${M.l - 10}" y="${Y(v) + 4}" text-anchor="end" fill="#8b8fb4" font-size="11" font-family="var(--mono)">${v}%</text>`;
   });
-  for (let k = 0; k <= 4; k++){
+  for (let k = 0; hasI && k <= 4; k++){
     const v = lo - pad + (hi - lo + 2 * pad) * k / 4;
     g += `<text x="${M.l + iw + 10}" y="${YI(v) + 4}" fill="#8b8fb4" opacity=".7" font-size="11" font-family="var(--mono)">${v.toFixed(0)}</text>`;
   }
@@ -722,7 +722,7 @@ function renderBreadth(){
     const i = Math.round(k * (D.length - 1) / Math.max(1, nt - 1));
     g += `<text x="${X(i)}" y="${H - 14}" text-anchor="middle" fill="#8b8fb4" font-size="11">${fmtD(D[i], true)}</text>`;
   }
-  g += `<path d="${path(I, YI)}" fill="none" stroke="#eef1ff" stroke-opacity=".32" stroke-width="1.3"/>`;
+  if (hasI) g += `<path d="${path(I, YI)}" fill="none" stroke="#eef1ff" stroke-opacity=".32" stroke-width="1.3"/>`;
   g += `<path d="${path(B, Y)}" fill="none" stroke="#a78bfa" stroke-opacity=".85" stroke-width="1.4"/>`;
   g += `<path d="${path(A, Y)}" fill="none" stroke="#67e8f9" stroke-width="2.4" style="filter:drop-shadow(0 0 5px #67e8f988)"/>`;
   const L = A.length - 1;
@@ -884,8 +884,9 @@ def main() -> None:
     breadth = None
     if br_syms:
         n_long, n_short = (200, 50) if args.interval == "1d" else (40, 10)
-        br_bench = (px[index_sym] if index_sym in px.columns and not only_equal
-                    else composite_index(px[[c for c in br_syms if c in px.columns]]))
+        br_bench = px[index_sym] if index_sym in px.columns and not only_equal else None
+        if br_bench is None or br_bench.tail(250).notna().mean() < 0.9:   # ดัชนีจาก Yahoo ขาดช่วง
+            br_bench = composite_index(px[[c for c in br_syms if c in px.columns]])
         breadth = build_breadth(px, br_syms, br_bench, n_long, n_short, br_label)
 
     # ── ตัวกรองสภาพคล่อง ─────────────────────────────────────────────
@@ -900,6 +901,11 @@ def main() -> None:
                 illiquid[c] = float(tv) / 1e6
         if illiquid:
             px = px.drop(columns=list(illiquid))
+
+    if index_sym in px.columns:
+        s_ix = px[index_sym]
+        print(f"benchmark {index_sym}: มีข้อมูล {int(s_ix.notna().sum())}/{len(s_ix)} แท่ง "
+              f"ล่าสุด {s_ix.last_valid_index()}", file=sys.stderr)
 
     # ── benchmark ทั้งสองแบบ ─────────────────────────────────────────
     benches: dict[str, tuple[str, pd.Series]] = {}
@@ -964,16 +970,23 @@ def main() -> None:
     as_of = px.index[-1]
     as_of_str = as_of.strftime("%d %b %Y") if hasattr(as_of, "strftime") else str(as_of)
     tf = "รายวัน" if args.interval == "1d" else "รายสัปดาห์"
-    default_u = list(chosen)[0]
-    default_b = list(benches)[0]
+    # ใช้เฉพาะชุด/benchmark ที่คำนวณได้จริง (กันหน้าเว็บว่างเมื่อ Yahoo ไม่มีข้อมูลดัชนี)
+    live_b = [b for b in benches if any(k.endswith("|" + b) for k in views)]
+    live_u = [u for u in chosen if any(k.startswith(u + "|") for k in views)]
+    for b in benches:
+        if b not in live_b:
+            print(f"  ⚠ benchmark {benches[b][0]} คำนวณไม่ได้ (ข้อมูลไม่พอ) — ตัดออกจากหน้าเว็บ",
+                  file=sys.stderr)
+    default_u = live_u[0]
+    default_b = live_b[0]
 
     payload = {
         "asOf": as_of_str,
         "defaultTail": args.tail,
         "tailOptions": sorted({5, args.tail, 20}),
-        "universes": [{"key": k, "label": U_LABEL[k]} for k in chosen],
+        "universes": [{"key": k, "label": U_LABEL[k]} for k in live_u],
         "benchmarks": [{"key": k, "label": v[0].replace("^", "").replace(".BK", "")}
-                       for k, v in benches.items()],
+                       for k, v in benches.items() if k in live_b],
         "defaultUniverse": default_u,
         "defaultBenchmark": default_b,
         "views": views,
